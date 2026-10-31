@@ -220,6 +220,27 @@ def _require_finite_statistics(values: NDArray[np.float64], *, name: str) -> Non
         raise ValueError(f"{name} cannot be represented as finite float64 statistics")
 
 
+def _centered_scaled_float64_values(
+    values: NDArray[np.floating], *, name: str, axis: int | None
+) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+    """Remove a common offset before scaling so small spreads retain their bits."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        work = np.asarray(values, dtype=np.float64)
+    if not np.isfinite(work).all():
+        raise ValueError(f"{name} must be representable as finite float64 values")
+    minimum = np.min(work, axis=axis, keepdims=True)
+    maximum = np.max(work, axis=axis, keepdims=True)
+    # Same-sign differences cannot overflow. Mixed-sign samples retain the
+    # existing zero-origin scaling, including finite extreme-value handling.
+    origin = np.where(minimum >= 0.0, minimum, np.where(maximum <= 0.0, maximum, 0.0))
+    spread = np.max(np.abs(work - origin), axis=axis, keepdims=True)
+    # Do not round a subnormal displacement before adding it back to the
+    # origin. Retain the zero-origin reduction in this range (and for constants).
+    origin = np.where(spread >= np.finfo(np.float64).tiny, origin, 0.0)
+    scaled, scale = _scaled_float64_values(work - origin, name=name, axis=axis)
+    return scaled, scale, origin
+
+
 def _require_sample_vector(values: object, *, name: str) -> NDArray[np.float64]:
     """Return ``values`` as a rank-1 array: exactly one sample per seed.
 
@@ -321,12 +342,18 @@ def compute_statistics(
     _require_finite_values(arr, name="values")
     confidence_level = _validate_confidence_level(confidence_level)
 
-    scaled, scale_array = _scaled_float64_values(arr, name="values", axis=None)
+    scaled, scale_array, origin_array = _centered_scaled_float64_values(
+        arr, name="values", axis=None
+    )
     scale = float(scale_array.item())
+    origin = float(origin_array.item())
     ordered = np.sort(np.asarray(arr, dtype=np.float64))
     with np.errstate(over="ignore", invalid="ignore"):
-        mean = float(np.mean(scaled) * scale)
-        std = float(np.std(scaled, ddof=1) * scale) if n > 1 else 0.0
+        relative_mean = float(np.mean(scaled))
+        relative_std = float(np.std(scaled, ddof=1)) if n > 1 else 0.0
+        relative_sem = relative_std / np.sqrt(n) if n > 1 else 0.0
+        mean = float(origin + relative_mean * scale)
+        std = relative_std * scale
         sem = std / np.sqrt(n) if n > 1 else 0.0
         median = _summary_quartile(ordered, 2)
         q25 = _summary_quartile(ordered, 1)
@@ -344,9 +371,9 @@ def compute_statistics(
     if n > 1:
         t_value = float(stats.t.ppf((1 + confidence_level) / 2, n - 1))
         with np.errstate(over="ignore", invalid="ignore"):
-            margin = t_value * sem
-            ci_lower = mean - margin
-            ci_upper = mean + margin
+            margin = t_value * relative_sem
+            ci_lower = origin + (relative_mean - margin) * scale
+            ci_upper = origin + (relative_mean + margin) * scale
     else:
         ci_lower = ci_upper = mean
 
@@ -398,9 +425,13 @@ def compute_timeseries_statistics(
         raise ValueError("metric_array must contain at least one time step")
     _require_finite_values(metric_array, name="metric_array")
     confidence_level = _validate_confidence_level(confidence_level)
-    scaled, scales = _scaled_float64_values(metric_array, name="metric_array", axis=0)
+    scaled, scales, origins = _centered_scaled_float64_values(
+        metric_array, name="metric_array", axis=0
+    )
     scale = scales[0]
-    mean = np.mean(scaled, axis=0) * scale
+    origin = origins[0]
+    relative_mean = np.mean(scaled, axis=0)
+    mean = origin + relative_mean * scale
 
     if n_seeds == 1:
         # One seed has no between-seed spread estimate; return the degenerate
@@ -410,7 +441,7 @@ def compute_timeseries_statistics(
 
     with np.errstate(over="ignore", invalid="ignore"):
         # A finite confidence interval need not have a representable sample SD.
-        sem = (np.std(scaled, axis=0, ddof=1) / np.sqrt(n_seeds)) * scale
+        relative_sem = np.std(scaled, axis=0, ddof=1) / np.sqrt(n_seeds)
 
     try:
         from scipy import stats
@@ -421,9 +452,9 @@ def compute_timeseries_statistics(
 
     t_value = stats.t.ppf((1 + confidence_level) / 2, n_seeds - 1)
     with np.errstate(over="ignore", invalid="ignore"):
-        margin = t_value * sem
-        ci_lower = mean - margin
-        ci_upper = mean + margin
+        margin = t_value * relative_sem
+        ci_lower = origin + (relative_mean - margin) * scale
+        ci_upper = origin + (relative_mean + margin) * scale
 
     _require_finite_statistics(
         np.asarray([mean, ci_lower, ci_upper]), name="metric_array"
@@ -1148,9 +1179,12 @@ def bootstrap_ci(
     rng = np.random.default_rng(seed)
 
     stat_func = np.mean if statistic == "mean" else np.median
-    scaled, scale_array = _scaled_float64_values(arr, name="values", axis=None)
+    scaled, scale_array, origin_array = _centered_scaled_float64_values(
+        arr, name="values", axis=None
+    )
     scale = float(scale_array.item())
-    point_estimate = float(stat_func(scaled) * scale)
+    origin = float(origin_array.item())
+    point_estimate = float(stat_func(scaled) * scale + origin)
 
     # Generate bootstrap samples
     bootstrap_stats_list: list[float] = []
@@ -1163,7 +1197,7 @@ def bootstrap_ci(
     # Percentile method
     lower_percentile = (1 - confidence_level) / 2 * 100
     upper_percentile = (1 + confidence_level) / 2 * 100
-    ci_lower = float(np.percentile(bootstrap_stats, lower_percentile) * scale)
-    ci_upper = float(np.percentile(bootstrap_stats, upper_percentile) * scale)
+    ci_lower = float(np.percentile(bootstrap_stats, lower_percentile) * scale + origin)
+    ci_upper = float(np.percentile(bootstrap_stats, upper_percentile) * scale + origin)
 
     return point_estimate, ci_lower, ci_upper
