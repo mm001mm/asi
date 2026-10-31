@@ -701,6 +701,16 @@ def mann_whitney_comparison(
             f"independent Mann-Whitney test requires non-empty groups (got {len(a)} and {len(b)})"
         )
 
+    if a.dtype.kind in "iu" and b.dtype.kind in "iu":
+        # The test depends only on joint ordering and ties. SciPy's float
+        # conversion and NumPy's mixed signed/unsigned comparisons can merge
+        # distinct large integers, even in the all-tied shortcut below.
+        # Encode the exact Python-integer order before either operation.
+        ordered = sorted({int(value) for sample in (a, b) for value in sample})
+        ranks = {value: index for index, value in enumerate(ordered)}
+        a = np.asarray([ranks[int(value)] for value in a], dtype=np.float64)
+        b = np.asarray([ranks[int(value)] for value in b], dtype=np.float64)
+
     if np.all(a == a[0]) and np.all(b == a[0]):
         # Every cross-group pair is a tie.  The exact permutation null puts
         # all mass at U=n_a*n_b/2, hence p=1; scipy's asymptotic tie variance
