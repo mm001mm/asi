@@ -741,6 +741,37 @@ def mann_whitney_comparison(
     )
 
 
+def _overflow_safe_signed_ranks(
+    a: NDArray[np.float64], b: NDArray[np.float64]
+) -> NDArray[np.float64] | None:
+    """Preserve ranks when subtracting finite floating-point pairs overflows."""
+    with np.errstate(over="ignore", invalid="ignore"):
+        differences = a - b
+    if np.isfinite(differences).all():
+        return None
+
+    # Finite differences keep SciPy's usual subtraction semantics. Overflowed
+    # differences need exact magnitudes: scaling all pairs could flush a tiny
+    # nonzero difference to zero and change its rank or the null sample size.
+    magnitudes: list[float | Fraction] = [
+        abs(float(difference)) if np.isfinite(difference) else
+        abs(Fraction.from_float(float(left)) - Fraction.from_float(float(right)))
+        for left, right, difference in zip(a, b, differences, strict=True)
+    ]
+    order = sorted(range(len(magnitudes)), key=magnitudes.__getitem__)
+    signed_ranks = np.empty(len(order), dtype=np.float64)
+    start = 0
+    while start < len(order):
+        end = start + 1
+        while end < len(order) and magnitudes[order[end]] == magnitudes[order[start]]:
+            end += 1
+        average_rank = (start + 1 + end) / 2.0
+        for index in order[start:end]:
+            signed_ranks[index] = np.sign(differences[index]) * average_rank
+        start = end
+    return signed_ranks
+
+
 def wilcoxon_comparison(
     values_a: NDArray[np.float64] | list[float],
     values_b: NDArray[np.float64] | list[float],
@@ -801,7 +832,13 @@ def wilcoxon_comparison(
     try:
         from scipy import stats
 
-        result = stats.wilcoxon(a, b, alternative="two-sided")
+        signed_ranks = _overflow_safe_signed_ranks(a, b)
+        if signed_ranks is None:
+            result = stats.wilcoxon(a, b, alternative="two-sided")
+        else:
+            # Only signs, ranks and ties enter the signed-rank statistic. Feed
+            # finite signed ranks back through SciPy's same p-value procedure.
+            result = stats.wilcoxon(signed_ranks, alternative="two-sided")
         # scipy returns (statistic, pvalue) tuple
         stat_val = float(result[0])
         p_val = _require_p_value(
