@@ -1428,3 +1428,23 @@ def test_cbp_ranking_fallback_preserves_finite_scores_and_rejects_poison(disable
             )
             assert int(index) == expected
             assert bool(found) == available
+
+
+@pytest.mark.parametrize("disable_jit", [True, False])
+@pytest.mark.parametrize("exponent", [-120, 0, 120, 127, 128])
+@pytest.mark.parametrize("ages, expected", [([0, 1, 2], 2), ([0, 2, 1], 1)])
+def test_cbp_replacement_ranking_survives_common_scale(
+    disable_jit: bool, exponent: int, ages: list[int], expected: int
+) -> None:
+    # Distinct debiased scores must keep their order across finite input scales.
+    utilities = (
+        np.asarray([0.0, 0.75, 0.5], dtype=np.float64) * 2.0**exponent
+    ).astype(np.float32)
+    assert bool(np.isfinite(utilities).all())
+    select = jax.jit(lambda u, a: _select_replacement_index(u, a, 1, 0.99))
+    with jax.disable_jit(disable_jit):
+        index, found = select(
+            jnp.asarray(utilities), jnp.asarray(ages, dtype=jnp.int32)
+        )
+    assert bool(found)
+    assert int(index) == expected
