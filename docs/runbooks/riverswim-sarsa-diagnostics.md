@@ -27,6 +27,9 @@ executed. Both source schemas are supported; other schemas fail closed.
   normalization, LMS updates, zero initial biases and traces, accumulating
   eligibility, one-hot observations, and continuing unit environment discount.
   Discounted SARSA still applies its configured gamma in its own TD target.
+- Both the original configuration fields and the current default
+  `initial_q_value: null` are supported. Non-null initialization overrides and
+  unknown configuration fields remain unsupported.
 - Initial Q values and the complete action sequence are inputs, not verified
   outcomes of initialization or the policy. Source/runtime provenance,
   epsilon-greedy choices, RNG keys, and environment stochastic samples are

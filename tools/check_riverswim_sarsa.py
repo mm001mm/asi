@@ -166,10 +166,15 @@ def check_record(record: dict[str, Any]) -> dict[str, Any]:
     for flag in ("scientific_promotion_allowed", "reference_dev_population_allowed"):
         _require(record.get(flag) is False, f"{flag} must be false")
     config, env = record.get("config"), record.get("environment")
-    _require(type(config) is dict and set(config) == CONFIG_FIELDS, "unsupported config fields")
+    _require(type(config) is dict, "config must be an object")
     _require(type(env) is dict, "environment must be an object")
     config = cast(dict[str, Any], config)
     env = cast(dict[str, Any], env)
+    config_fields = set(config)
+    if "initial_q_value" in config_fields:
+        _require(config["initial_q_value"] is None, "unsupported config initial_q_value")
+        config_fields.remove("initial_q_value")
+    _require(config_fields == CONFIG_FIELDS, "unsupported config fields")
     required_config = {
         "algorithm": "discounted_sarsa",
         "environment_kind": "riverswim",

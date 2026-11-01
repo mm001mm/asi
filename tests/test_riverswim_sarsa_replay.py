@@ -118,6 +118,13 @@ def test_real_update_diagnostics_match_independent_recurrence(record: dict[str, 
     assert result["scientific_promotion_allowed"] is False
 
 
+def test_default_initial_q_field_matches_legacy_config(record: dict[str, Any]) -> None:
+    assert record["config"]["initial_q_value"] is None
+    legacy = copy.deepcopy(record)
+    del legacy["config"]["initial_q_value"]
+    assert _checker().check_record(record) == _checker().check_record(legacy)
+
+
 @pytest.mark.parametrize("name", ["lambda0", "lambda08", "scaled", "gamma099"])
 def test_real_record_prefixes_match_without_network_or_learner_execution(name: str) -> None:
     path = Path(__file__).parent / "fixtures" / "riverswim_sarsa" / f"{name}.json"
@@ -169,6 +176,16 @@ def test_reward_uses_previous_state_and_executed_action(record: dict[str, Any]) 
         {"algorithm": "differential_sarsa"},
         {"normalizer": {}},
         {"n_actions": True},
+        {"unknown_initialization": None},
+        {"initial_q_value": 0.0},
+        {"initial_q_value": 1.0},
+        {"initial_q_value": True},
+        {"initial_q_value": False},
+        {"initial_q_value": "0"},
+        {"initial_q_value": []},
+        {"initial_q_value": {}},
+        {"initial_q_value": float("nan")},
+        {"initial_q_value": float("inf")},
     ],
 )
 def test_unsupported_config_fails_closed(record: dict[str, Any], change: dict[str, Any]) -> None:
