@@ -744,20 +744,28 @@ def mann_whitney_comparison(
 def _overflow_safe_signed_ranks(
     a: NDArray[np.float64], b: NDArray[np.float64]
 ) -> NDArray[np.float64] | None:
-    """Preserve ranks when subtracting finite floating-point pairs overflows."""
-    with np.errstate(over="ignore", invalid="ignore"):
-        differences = a - b
-    if np.isfinite(differences).all():
-        return None
+    """Preserve ranks for integer pairs and overflowed finite floating gaps."""
+    magnitudes: list[int | float | Fraction]
+    if a.dtype.kind in "iu" and b.dtype.kind in "iu":
+        # SciPy promotes integer samples before subtraction, which can erase
+        # small gaps or turn distinct large gaps into ties. Rank exact gaps.
+        exact = [int(left) - int(right) for left, right in zip(a, b, strict=True)]
+        magnitudes = [abs(value) for value in exact]
+        signs = [(value > 0) - (value < 0) for value in exact]
+    else:
+        with np.errstate(over="ignore", invalid="ignore"):
+            differences = a - b
+        if np.isfinite(differences).all():
+            return None
 
-    # Finite differences keep SciPy's usual subtraction semantics. Overflowed
-    # differences need exact magnitudes: scaling all pairs could flush a tiny
-    # nonzero difference to zero and change its rank or the null sample size.
-    magnitudes: list[float | Fraction] = [
-        abs(float(difference)) if np.isfinite(difference) else
-        abs(Fraction.from_float(float(left)) - Fraction.from_float(float(right)))
-        for left, right, difference in zip(a, b, differences, strict=True)
-    ]
+        # Keep finite floating subtraction semantics. Scaling all pairs could
+        # flush a tiny gap to zero and change its rank or the null sample size.
+        magnitudes = [
+            abs(float(difference)) if np.isfinite(difference) else
+            abs(Fraction.from_float(float(left)) - Fraction.from_float(float(right)))
+            for left, right, difference in zip(a, b, differences, strict=True)
+        ]
+        signs = [int(np.sign(value)) for value in differences]
     order = sorted(range(len(magnitudes)), key=magnitudes.__getitem__)
     signed_ranks = np.empty(len(order), dtype=np.float64)
     start = 0
@@ -767,7 +775,7 @@ def _overflow_safe_signed_ranks(
             end += 1
         average_rank = (start + 1 + end) / 2.0
         for index in order[start:end]:
-            signed_ranks[index] = np.sign(differences[index]) * average_rank
+            signed_ranks[index] = signs[index] * average_rank
         start = end
     return signed_ranks
 
@@ -819,7 +827,12 @@ def wilcoxon_comparison(
         )
     _require_exact_str("method_a", method_a)
     _require_exact_str("method_b", method_b)
-    if a.size > 0 and np.array_equal(a, b):
+    integer_pairs = a.dtype.kind in "iu" and b.dtype.kind in "iu"
+    equal_samples = (
+        all(int(left) == int(right) for left, right in zip(a, b, strict=True))
+        if integer_pairs else np.array_equal(a, b)
+    )
+    if a.size > 0 and equal_samples:
         raise ValueError(
             f"Paired comparison '{method_a}' vs '{method_b}' has identical "
             "samples; the Wilcoxon signed-rank statistic is undefined"
