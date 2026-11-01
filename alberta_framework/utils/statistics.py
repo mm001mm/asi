@@ -233,11 +233,27 @@ def _centered_scaled_float64_values(
     # Same-sign differences cannot overflow. Mixed-sign samples retain the
     # existing zero-origin scaling, including finite extreme-value handling.
     origin = np.where(minimum >= 0.0, minimum, np.where(maximum <= 0.0, maximum, 0.0))
-    spread = np.max(np.abs(work - origin), axis=axis, keepdims=True)
+    if values.dtype.kind in "iu":
+        # Subtract the representable origin as Python integers before a cast
+        # can erase small int64/uint64 gaps. Python subtraction cannot wrap,
+        # even when a rounded uint64 origin is just outside its dtype range.
+        origins = np.broadcast_to(origin, values.shape)
+        shifted = np.fromiter(
+            (int(value) - int(offset) for value, offset in zip(
+                values.flat, origins.flat, strict=True
+            )),
+            dtype=np.float64,
+            count=values.size,
+        ).reshape(values.shape)
+    else:
+        shifted = work - origin
+    spread = np.max(np.abs(shifted), axis=axis, keepdims=True)
     # Do not round a subnormal displacement before adding it back to the
     # origin. Retain the zero-origin reduction in this range (and for constants).
-    origin = np.where(spread >= np.finfo(np.float64).tiny, origin, 0.0)
-    scaled, scale = _scaled_float64_values(work - origin, name=name, axis=axis)
+    centered = spread >= np.finfo(np.float64).tiny
+    origin = np.where(centered, origin, 0.0)
+    shifted = np.where(centered, shifted, work)
+    scaled, scale = _scaled_float64_values(shifted, name=name, axis=axis)
     return scaled, scale, origin
 
 
@@ -317,6 +333,15 @@ def _summary_quartile(sorted_values: NDArray[np.float64], quarter: int) -> float
     return (1.0 - weight) * lower + weight * upper
 
 
+def _integer_quartile_ticks(sorted_values: NDArray[Any], quarter: int) -> int:
+    """Return four times an integer sample quartile before rounding it."""
+    index, remainder = divmod((len(sorted_values) - 1) * quarter, 4)
+    lower = int(sorted_values[index])
+    if remainder == 0:
+        return 4 * lower
+    return (4 - remainder) * lower + remainder * int(sorted_values[index + 1])
+
+
 def compute_statistics(
     values: NDArray[np.float64] | list[float],
     confidence_level: float = 0.95,
@@ -347,7 +372,7 @@ def compute_statistics(
     )
     scale = float(scale_array.item())
     origin = float(origin_array.item())
-    ordered = np.sort(np.asarray(arr, dtype=np.float64))
+    ordered = np.sort(arr)
     with np.errstate(over="ignore", invalid="ignore"):
         relative_mean = float(np.mean(scaled))
         relative_std = float(np.std(scaled, ddof=1)) if n > 1 else 0.0
@@ -355,10 +380,15 @@ def compute_statistics(
         mean = float(origin + relative_mean * scale)
         std = relative_std * scale
         sem = std / np.sqrt(n) if n > 1 else 0.0
-        median = _summary_quartile(ordered, 2)
-        q25 = _summary_quartile(ordered, 1)
-        q75 = _summary_quartile(ordered, 3)
-        iqr = q75 - q25
+        if arr.dtype.kind in "iu":
+            median = _integer_quartile_ticks(ordered, 2) / 4
+            iqr = (_integer_quartile_ticks(ordered, 3) - _integer_quartile_ticks(ordered, 1)) / 4
+        else:
+            ordered = np.asarray(ordered, dtype=np.float64)
+            median = _summary_quartile(ordered, 2)
+            q25 = _summary_quartile(ordered, 1)
+            q75 = _summary_quartile(ordered, 3)
+            iqr = q75 - q25
 
     # Compute confidence interval
     try:
